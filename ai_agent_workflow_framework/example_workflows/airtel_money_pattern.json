@@ -1,0 +1,57 @@
+{
+  "workflow_id": "wf_airtel_money_pattern",
+  "name": "Airtel Money Pattern Example",
+  "version": "1.0.0",
+  "status": "DRAFT",
+  "trigger": {
+    "type": "manual",
+    "config": {}
+  },
+  "nodes": [
+    {
+      "id": "node_1",
+      "type": "trino_read",
+      "label": "Fetch Reconciliation Rows",
+      "config": {
+        "query": "SELECT opco, table_name, difference FROM some_table LIMIT 100"
+      }
+    },
+    {
+      "id": "node_2",
+      "type": "if_else",
+      "label": "Check if any mismatched exist",
+      "config": {
+        "condition": {
+          "left": "{{node_outputs.node_1.output.row_count}}",
+          "operator": "gt",
+          "right": 0
+        },
+        "true_next": "node_3",
+        "false_next": "node_4"
+      }
+    },
+    {
+      "id": "node_3",
+      "type": "csv_writer",
+      "label": "Write CSV",
+      "config": {
+        "file_prefix": "airtel_money_rows",
+        "rows": "{{node_outputs.node_1.output.rows}}"
+      }
+    },
+    {
+      "id": "node_4",
+      "type": "hdfs_list",
+      "label": "Check HDFS Landing Path",
+      "config": {
+        "path": "/data/airtel_money/KE/users/dt=2026-06-11/"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "node_1", "target": "node_2"},
+    {"source": "node_2", "target": "node_3"},
+    {"source": "node_2", "target": "node_4"}
+  ],
+  "metadata": {}
+}

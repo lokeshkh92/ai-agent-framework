@@ -1,0 +1,11 @@
+app:
+  name: workflow-ai-framework
+  version: 1.0.0
+
+features:
+  in_memory_workflow_repository: true
+  in_memory_execution_repository: true
+
+ollama:
+  base_url: http://127.0.0.1:7180
+  model: llama31-monitoring

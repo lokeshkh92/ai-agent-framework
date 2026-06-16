@@ -1,0 +1,140 @@
+import uuid
+from typing import Dict, Any, List
+
+from workflow.context import WorkflowExecutionContext
+from core.exceptions import WorkflowExecutionError
+
+
+class WorkflowRuntime:
+    def __init__(
+        self,
+        node_registry,
+        workflow_repository,
+        workflow_execution_repository,
+        node_execution_repository,
+        dag_engine,
+    ):
+        self.node_registry = node_registry
+        self.workflow_repository = workflow_repository
+        self.workflow_execution_repository = workflow_execution_repository
+        self.node_execution_repository = node_execution_repository
+        self.dag_engine = dag_engine
+
+    def run_workflow(
+        self,
+        workflow_id: str,
+        input_payload: Dict[str, Any],
+        trigger_type: str = "manual",
+        trigger_source: str = "api",
+    ) -> Dict[str, Any]:
+        workflow = self.workflow_repository.get_published_workflow(workflow_id)
+        execution_id = str(uuid.uuid4())
+
+        context = WorkflowExecutionContext(
+            workflow_id=workflow.workflow_id,
+            execution_id=execution_id,
+            trigger_type=trigger_type,
+            trigger_source=trigger_source,
+            input_payload=input_payload,
+        )
+
+        self.workflow_execution_repository.create_started_execution(
+            execution_id=execution_id,
+            workflow_id=workflow.workflow_id,
+            workflow_version=workflow.version,
+            trigger_type=trigger_type,
+            trigger_source=trigger_source,
+            input_payload=input_payload,
+        )
+
+        try:
+            order = self.dag_engine.build_execution_order(workflow)
+            node_map = {node.id: node for node in workflow.nodes}
+            incoming_map = self._build_incoming_map(workflow)
+
+            for node_id in order:
+                node_def = node_map[node_id]
+                node_impl = self.node_registry.get(node_def.type)
+
+                inputs = self._collect_inputs(node_id=node_id, incoming_map=incoming_map, context=context)
+
+                self.node_execution_repository.create_started_node_execution(
+                    execution_id=execution_id,
+                    node_id=node_id,
+                    node_type=node_def.type,
+                    input_payload=inputs,
+                )
+
+                try:
+                    result = node_impl.execute(
+                        inputs=inputs,
+                        config=node_def.config,
+                        context=self._build_template_context(context),
+                    )
+                    context.set_node_output(node_id, result)
+
+                    if result.get("artifacts"):
+                        for artifact in result["artifacts"]:
+                            context.add_artifact(artifact)
+
+                    self.node_execution_repository.mark_success(
+                        execution_id=execution_id,
+                        node_id=node_id,
+                        output_payload=result,
+                    )
+                except Exception as node_exc:
+                    context.add_error({"node_id": node_id, "error": str(node_exc)})
+                    self.node_execution_repository.mark_failed(
+                        execution_id=execution_id,
+                        node_id=node_id,
+                        error_message=str(node_exc),
+                    )
+                    raise WorkflowExecutionError(f"Node {node_id} failed: {node_exc}") from node_exc
+
+            final_output = {
+                "workflow_id": workflow.workflow_id,
+                "execution_id": execution_id,
+                "node_outputs": context.node_outputs,
+                "artifacts": context.artifacts,
+                "errors": context.errors,
+            }
+
+            self.workflow_execution_repository.mark_success(execution_id=execution_id, output_payload=final_output)
+            return final_output
+
+        except Exception as exc:
+            self.workflow_execution_repository.mark_failed(
+                execution_id=execution_id,
+                error_message=str(exc),
+                output_payload={
+                    "node_outputs": context.node_outputs,
+                    "errors": context.errors,
+                },
+            )
+            raise
+
+    def _build_incoming_map(self, workflow) -> Dict[str, List[str]]:
+        incoming = {node.id: [] for node in workflow.nodes}
+        for edge in workflow.edges:
+            incoming[edge.target].append(edge.source)
+        return incoming
+
+    def _collect_inputs(self, node_id: str, incoming_map: Dict[str, List[str]], context: WorkflowExecutionContext) -> Dict[str, Any]:
+        upstream_nodes = incoming_map.get(node_id, [])
+
+        if not upstream_nodes:
+            return {"input_payload": context.input_payload}
+
+        inputs = {}
+        for upstream_node_id in upstream_nodes:
+            inputs[upstream_node_id] = context.get_node_output(upstream_node_id)
+        return inputs
+
+    def _build_template_context(self, context: WorkflowExecutionContext) -> Dict[str, Any]:
+        return {
+            "input_payload": context.input_payload,
+            "node_outputs": context.node_outputs,
+            "variables": context.variables,
+            "artifacts": context.artifacts,
+            "errors": context.errors,
+        }
