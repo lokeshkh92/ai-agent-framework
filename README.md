@@ -544,6 +544,3 @@ When extending the project:
 
 ---
 
-## 18. License
-
-Add your project license here (for example: MIT, Apache-2.0, proprietary/internal use, etc.).
